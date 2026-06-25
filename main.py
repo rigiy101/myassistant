@@ -1,6 +1,7 @@
-__version__ = "1.2"
+__version__ = "1.5"
 import os, json, threading
 from kivy.app import App
+from kivy.core.window import Window
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
 from kivy.uix.button import Button
@@ -10,7 +11,8 @@ from kivy.clock import Clock
 from kivy.core.text import LabelBase
 from kivy.metrics import dp
 
-# Шрифт с кириллицей: регистрируем как "Roboto" -> русские буквы видны во всех виджетах
+Window.softinput_mode = "pan"
+
 _FONT = "DejaVuSans.ttf"
 if os.path.exists(_FONT):
     LabelBase.register(name="Roboto", fn_regular=_FONT)
@@ -22,122 +24,289 @@ except Exception:
     HAVE_REQUESTS = False
 import urllib.request
 
+try:
+    from pybit.unified_trading import HTTP
+    bybit = HTTP(testnet=False)
+except Exception:
+    bybit = None
+
 DS_URL = "https://api.deepseek.com/chat/completions"
+TV_URL = "https://api.tavily.com/search"
 MODEL_FAST = "deepseek-chat"
 MODEL_SMART = "deepseek-reasoner"
-SMART_TRIGGERS = ["почему", "проанализир", "разбер", "сравни", "объясни подробно",
-                  "стратеги", "посчитай", "реши", "докажи", "в чём разница", "плюсы и минусы"]
+SMART = ["почему","проанализир","разбер","сравни","объясни подробно","стратеги",
+         "посчитай","реши","докажи","в чём разница","плюсы и минусы"]
 SYSTEM = "Ты полезный ассистент. Отвечай по-русски, ясно и по делу."
+
+INTERVAL="240"; CANDLES=1500; ATR_LEN=14; MAXH=300; MULT=3.0; COST_RT=0.0012; DON=20
+TREND_COIN="BTC"; FLAT_COIN="DOGE"
 
 class Assistant(App):
     def build(self):
         self.title = "Мой ассистент"
-        self.key_path = os.path.join(self.user_data_dir, "ds_key.txt")
-        self.api_key = self._load_key()
-        self.waiting_key = False
-        self.history = [{"role": "system", "content": SYSTEM}]
+        self.mode = "чат"
+        self.ds_path = os.path.join(self.user_data_dir, "ds_key.txt")
+        self.tv_path = os.path.join(self.user_data_dir, "tv_key.txt")
+        self.ds_key = self._load(self.ds_path)
+        self.tv_key = self._load(self.tv_path)
+        self.waiting = None
+        self.history = [{"role":"system","content":SYSTEM}]
 
-        root = BoxLayout(orientation="vertical", padding=dp(8), spacing=dp(8))
+        root = BoxLayout(orientation="vertical", padding=dp(6), spacing=dp(6))
 
-        self.scroll = ScrollView()
-        self.chat = Label(text="", size_hint_y=None, halign="left", valign="top",
-                          font_size=dp(17), padding=(dp(6), dp(6)))
-        self.chat.bind(width=lambda *_: setattr(self.chat, "text_size", (self.chat.width, None)))
-        self.chat.bind(texture_size=lambda *_: setattr(self.chat, "height", self.chat.texture_size[1]))
-        self.scroll.add_widget(self.chat)
+        tabs = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(4))
+        for name in ("Чат","Биржа","Тест"):
+            b = Button(text=name, font_size=dp(16))
+            b.bind(on_press=lambda w,n=name: self._set_mode(n))
+            tabs.add_widget(b)
+        root.add_widget(tabs)
+
+        self.scroll = ScrollView(size_hint_y=1)
+        self.out = Label(text="", size_hint_y=None, halign="left", valign="top",
+                         font_size=dp(16), padding=(dp(6),dp(6)))
+        self.out.bind(width=lambda *_: setattr(self.out,"text_size",(self.out.width,None)))
+        self.out.bind(texture_size=lambda *_: setattr(self.out,"height",self.out.texture_size[1]))
+        self.scroll.add_widget(self.out)
         root.add_widget(self.scroll)
 
         self.inp = TextInput(hint_text="Напиши сообщение...", multiline=False,
                              size_hint_y=None, height=dp(50), font_size=dp(18))
-        self.inp.bind(on_text_validate=lambda *_: self.send())
+        self.inp.bind(on_text_validate=lambda *_: self.go())
         root.add_widget(self.inp)
 
-        self.btn = Button(text="Отправить", size_hint_y=None, height=dp(54), font_size=dp(18))
-        self.btn.bind(on_press=lambda *_: self.send())
+        self.btn = Button(text="Отправить", size_hint_y=None, height=dp(52), font_size=dp(18))
+        self.btn.bind(on_press=lambda *_: self.go())
         root.add_widget(self.btn)
 
-        if not self.api_key:
-            Clock.schedule_once(lambda *_: self._ask_key(), 0.3)
+        if not self.ds_key:
+            Clock.schedule_once(lambda *_: self._ask_ds(), 0.3)
         else:
-            self._add("Ассистент", "Привет! Я готов. Напиши что-нибудь. (слово «забудь» очистит память)")
+            self._add("Ассистент","Готов. Вкладки сверху: Чат / Биржа / Тест.\nЧат — вопросы. Биржа — монета (BTC). Тест — просто стратегия: «тренд», «отбой» или «пробой» (прогоню сразу на BTC и DOGE).")
         return root
 
-    def _load_key(self):
-        try:
-            with open(self.key_path) as f:
-                return f.read().strip()
-        except Exception:
-            return ""
+    def _set_mode(self, n):
+        self.mode = n.lower()
+        hints = {"чат":"Напиши сообщение...","биржа":"Монета: BTC, ETH, SOL...","тест":"Стратегия: тренд / отбой / пробой"}
+        self.inp.hint_text = hints[self.mode]
+        self._add("—", "Режим: " + n)
 
-    def _save_key(self, k):
+    def _load(self, p):
         try:
-            with open(self.key_path, "w") as f:
-                f.write(k.strip())
-        except Exception:
-            pass
+            with open(p) as f: return f.read().strip()
+        except Exception: return ""
 
-    def _ask_key(self):
-        self._add("Ассистент", "Вставь свой ключ DeepSeek в поле внизу и нажми «Отправить». "
-                  "Сохраню на телефоне, больше спрашивать не буду.")
-        self.inp.hint_text = "Вставь ключ DeepSeek (sk-...)"
-        self.waiting_key = True
+    def _save(self, p, k):
+        try:
+            with open(p,"w") as f: f.write(k.strip())
+        except Exception: pass
+
+    def _ask_ds(self):
+        self._add("Ассистент","Вставь ключ DeepSeek (sk-...) и нажми «Отправить». Сохраню на телефоне.")
+        self.inp.hint_text = "Ключ DeepSeek (sk-...)"
+        self.waiting = "ds"
 
     def _add(self, who, text):
-        self.chat.text += "\n[" + who + "] " + text + "\n"
-        Clock.schedule_once(lambda *_: setattr(self.scroll, "scroll_y", 0), 0.1)
+        self.out.text += "\n[" + who + "] " + text + "\n"
+        Clock.schedule_once(lambda *_: setattr(self.scroll,"scroll_y",0), 0.1)
 
-    def send(self):
+    def go(self):
         text = self.inp.text.strip()
-        if not text:
-            return
-        if self.waiting_key:
-            self._save_key(text); self.api_key = text; self.waiting_key = False
-            self.inp.text = ""; self.inp.hint_text = "Напиши сообщение..."
-            self._add("Ассистент", "Ключ сохранён. Спрашивай что угодно.")
-            return
-        if text.lower() in ("забудь", "сброс", "очисти"):
-            self.history = [{"role": "system", "content": SYSTEM}]
-            self.inp.text = ""
-            self._add("Ассистент", "Память очищена.")
-            return
-        if not self.api_key:
-            self._add("Ассистент", "Сначала нужен ключ DeepSeek.")
-            return
-        self.inp.text = ""
+        if not text: return
+        if self.waiting == "ds":
+            self._save(self.ds_path,text); self.ds_key=text; self.waiting=None
+            self.inp.text=""; self.inp.hint_text="Напиши сообщение..."
+            self._add("Ассистент","Ключ сохранён. Можно работать."); return
+        if self.waiting == "tv":
+            self._save(self.tv_path,text); self.tv_key=text; self.waiting=None
+            self.inp.text=""; self.inp.hint_text="Напиши сообщение..."
+            self._add("Ассистент","Ключ Tavily сохранён. Повтори запрос."); return
+        if text.lower() in ("забудь","сброс","очисти"):
+            self.history=[{"role":"system","content":SYSTEM}]; self.inp.text=""
+            self._add("Ассистент","Память очищена."); return
+        self.inp.text=""
         self._add("Ты", text)
-        self.history.append({"role": "user", "content": text})
-        self._add("Ассистент", "думаю...")
         self.btn.disabled = True
-        smart = any(w in text.lower() for w in SMART_TRIGGERS) or len(text) > 200
-        model = MODEL_SMART if smart else MODEL_FAST
-        threading.Thread(target=self._ask_model, args=(model,), daemon=True).start()
+        if self.mode == "биржа":
+            threading.Thread(target=self._do_price, args=(text,), daemon=True).start()
+        elif self.mode == "тест":
+            self._add("…","двойной тест на "+TREND_COIN+" и "+FLAT_COIN+", это ~30-60 сек, подожди...")
+            threading.Thread(target=self._do_test, args=(text,), daemon=True).start()
+        else:
+            if not self.ds_key:
+                self._add("Ассистент","Сначала нужен ключ DeepSeek."); self.btn.disabled=False; return
+            self.history.append({"role":"user","content":text})
+            self._add("Ассистент","думаю...")
+            threading.Thread(target=self._do_chat, args=(text,), daemon=True).start()
 
-    def _ask_model(self, model):
-        answer = self._request(model)
-        Clock.schedule_once(lambda *_: self._show_answer(answer), 0)
+    # ---------- ЧАТ + интернет ----------
+    def _do_chat(self, text):
+        low = text.lower()
+        web = any(w in low for w in ["сегодня","сейчас","новост","последн","свеж","актуальн","происходит","погода","2026"])
+        msg = text
+        if web and self.tv_key:
+            info = self._tavily(text)
+            if info: msg = "Вопрос: "+text+"\n\nСвежие данные из интернета, ответь кратко своими словами:\n\n"+info
+        elif web and not self.tv_key:
+            Clock.schedule_once(lambda *_: self._need_tv(), 0); return
+        model = MODEL_SMART if (any(w in low for w in SMART) or len(text)>200) else MODEL_FAST
+        self.history[-1] = {"role":"user","content":msg}
+        ans = self._deepseek(model)
+        self.history[-1] = {"role":"user","content":text}
+        self.history.append({"role":"assistant","content":ans})
+        Clock.schedule_once(lambda *_: self._done("думаю...", ans), 0)
 
-    def _request(self, model):
-        payload = {"model": model, "messages": self.history, "stream": False}
-        headers = {"Authorization": "Bearer " + self.api_key,
-                   "Content-Type": "application/json"}
+    def _need_tv(self):
+        self.out.text = self.out.text.replace("\n[Ассистент] думаю...\n","")
+        self._add("Ассистент","Для свежих данных нужен ключ Tavily. Вставь его (tvly-...) и нажми «Отправить».")
+        self.inp.hint_text="Ключ Tavily (tvly-...)"; self.waiting="tv"; self.btn.disabled=False
+        if self.history and self.history[-1]["role"]=="user": self.history.pop()
+
+    def _tavily(self, query):
+        try:
+            r = requests.post(TV_URL, json={"api_key":self.tv_key,"query":query,
+                              "max_results":5,"include_answer":True}, timeout=60)
+            if r.status_code != 200: return None
+            j = r.json()
+            t = "Сводка: "+str(j.get("answer",""))+"\n\nИсточники:\n"
+            for res in j.get("results",[]):
+                t += "- "+res.get("title","")+": "+res.get("content","")[:250]+"\n"
+            return t
+        except Exception: return None
+
+    def _deepseek(self, model):
+        payload={"model":model,"messages":self.history,"stream":False}
+        headers={"Authorization":"Bearer "+self.ds_key,"Content-Type":"application/json"}
         try:
             if HAVE_REQUESTS:
-                r = requests.post(DS_URL, headers=headers, json=payload, timeout=120)
-                if r.status_code != 200:
-                    return "Ошибка " + str(r.status_code) + ": " + r.text[:150]
+                r=requests.post(DS_URL,headers=headers,json=payload,timeout=120)
+                if r.status_code!=200: return "Ошибка "+str(r.status_code)+": "+r.text[:150]
                 return r.json()["choices"][0]["message"]["content"]
-            else:
-                data = json.dumps(payload).encode()
-                req = urllib.request.Request(DS_URL, data=data, headers=headers)
-                with urllib.request.urlopen(req, timeout=120) as resp:
-                    return json.loads(resp.read().decode())["choices"][0]["message"]["content"]
+            data=json.dumps(payload).encode()
+            req=urllib.request.Request(DS_URL,data=data,headers=headers)
+            with urllib.request.urlopen(req,timeout=120) as resp:
+                return json.loads(resp.read().decode())["choices"][0]["message"]["content"]
         except Exception as e:
-            return "Сбой связи: " + str(e)
+            return "Сбой связи: "+str(e)
 
-    def _show_answer(self, answer):
-        self.chat.text = self.chat.text.replace("\n[Ассистент] думаю...\n", "")
+    # ---------- БИРЖА ----------
+    def _sym(self, coin): return coin.upper().replace("USDT","")+"USDT"
+
+    def _do_price(self, coin):
+        if bybit is None:
+            Clock.schedule_once(lambda *_: self._done(None,"Биржа недоступна (pybit не загрузился)."),0); return
+        try:
+            sym=self._sym(coin.split()[0])
+            t=bybit.get_tickers(category="linear",symbol=sym)["result"]["list"][0]
+            price=float(t["lastPrice"]); pcnt=float(t["price24hPcnt"])*100
+            k=bybit.get_kline(category="linear",symbol=sym,interval="D",limit=30)["result"]["list"]
+            closes=[float(x[4]) for x in k][::-1]; ma=sum(closes[-20:])/20; last=closes[-1]
+            trend="вверх" if last>ma else "вниз"
+            msg=(sym+"\nЦена: "+str(price)+" USDT\nЗа 24ч: "+("%+.2f"%pcnt)+"%\n"
+                 "Средняя 20д: "+("%.2f"%ma)+"\nТренд: "+trend)
+        except Exception as e:
+            msg="Не нашёл данные по "+coin+" ("+str(e)[:60]+")"
+        Clock.schedule_once(lambda *_: self._done(None,msg),0)
+
+    # ---------- ТЕСТ (двойной: тренд + боковик) ----------
+    def _do_test(self, text):
+        strat = text.split()[0].lower() if text.split() else "тренд"
+        if strat not in ("тренд","отбой","пробой"):
+            Clock.schedule_once(lambda *_: self._done("двойной", "Стратегии: тренд, отбой, пробой."),0); return
+        try:
+            r1, m1 = self._backtest(TREND_COIN, strat)
+            r2, m2 = self._backtest(FLAT_COIN, strat)
+            ev1,R1,t1 = m1; ev2,R2,t2 = m2
+            ok1 = (t1>=20 and R1>0 and ev1>=0.02)
+            ok2 = (t2>=20 and R2>0 and ev2>=0.02)
+            verdict = "\n=== СВОДКА ДВОЙНОГО ТЕСТА ===\n"
+            if ok1 and ok2:
+                verdict += "'"+strat+"' работает И на тренде ("+TREND_COIN+"), И на боковике ("+FLAT_COIN+"). Крепко — редкость, проверь ещё на 2-3 монетах."
+            elif ok1 and not ok2:
+                verdict += "'"+strat+"' работает на трендовом "+TREND_COIN+", но НЕ на боковике "+FLAT_COIN+". Трендовая стратегия — годна только в тренде, на пиле сольёт."
+            elif (not ok1) and ok2:
+                verdict += "Странно: '"+strat+"' не прошла на "+TREND_COIN+", но прошла на "+FLAT_COIN+". Скорее случайность — перепроверь."
+            else:
+                verdict += "'"+strat+"' не прошла НИ на "+TREND_COIN+", НИ на "+FLAT_COIN+". Хлам, забудь."
+            msg = r1+"\n"+r2+verdict
+        except Exception as e:
+            msg = "Ошибка теста: "+str(e)[:80]
+        Clock.schedule_once(lambda *_: self._done("двойной", msg),0)
+
+    def _backtest(self, coin, strat):
+        # возвращает (текст, (ev, R, trades)) по OOS
+        if bybit is None: return "Биржа недоступна.", (0,0,0)
+        sym=self._sym(coin)
+        col={}; end=None
+        while len(col)<CANDLES:
+            p=dict(category="spot",symbol=sym,interval=INTERVAL,limit=1000)
+            if end is not None: p["end"]=end
+            b=bybit.get_kline(**p)["result"]["list"]
+            if not b: break
+            for c in b: col[int(c[0])]=c
+            ne=min(int(c[0]) for c in b)-1
+            if end is not None and ne>=end: break
+            end=ne
+        cd=[col[t] for t in sorted(col)]
+        H=[float(c[2]) for c in cd]; L=[float(c[3]) for c in cd]; C=[float(c[4]) for c in cd]
+        n=len(C)
+        if n<200: return ("Мало данных по "+sym+" ("+str(n)+").", (0,0,0))
+        TR=[H[0]-L[0]]
+        for i in range(1,n): TR.append(max(H[i]-L[i],abs(H[i]-C[i-1]),abs(L[i]-C[i-1])))
+        ATR=[None]*n
+        ATR[ATR_LEN]=sum(TR[1:ATR_LEN+1])/ATR_LEN
+        for i in range(ATR_LEN+1,n): ATR[i]=(ATR[i-1]*(ATR_LEN-1)+TR[i])/ATR_LEN
+        sig=[]; trail=(strat!="пробой")
+        for t in range(DON,n):
+            hh=max(H[t-DON:t]); ll=min(L[t-DON:t]); a=ATR[t] or 0
+            if a<=0: continue
+            if strat=="отбой":
+                if L[t]<ll: sig.append((t,"long",C[t],C[t]-2*a))
+                elif H[t]>hh: sig.append((t,"short",C[t],C[t]+2*a))
+            else:
+                if H[t]>hh: sig.append((t,"long",hh,hh-2*a))
+                elif L[t]<ll: sig.append((t,"short",ll,ll+2*a))
+        def run(lo,hi):
+            R=0.0; wins=0; tr=0
+            for t,dirn,entry,stop0 in sig:
+                if not (lo<=t<hi): continue
+                risk=abs(entry-stop0)
+                if risk<=0 or t+1>=n: continue
+                stop=stop0; peak=entry; trough=entry; oc=None
+                tgt=entry+2*risk if dirn=="long" else entry-2*risk
+                for f in range(t+1,min(t+1+MAXH,n)):
+                    a=ATR[f] or ATR[t] or risk
+                    if dirn=="long":
+                        if L[f]<=stop: oc=(stop-entry)/risk; break
+                        if not trail and H[f]>=tgt: oc=2.0; break
+                        peak=max(peak,H[f])
+                        if trail: stop=max(stop,peak-MULT*a)
+                    else:
+                        if H[f]>=stop: oc=(entry-stop)/risk; break
+                        if not trail and L[f]<=tgt: oc=2.0; break
+                        trough=min(trough,L[f])
+                        if trail: stop=min(stop,trough+MULT*a)
+                if oc is None:
+                    f=min(t+MAXH,n-1)
+                    oc=((C[f]-entry) if dirn=="long" else (entry-C[f]))/risk
+                oc-=COST_RT*(entry/risk); tr+=1
+                if oc>0: wins+=1
+                R+=oc
+            ev=R/tr if tr else 0; wr=wins/tr*100 if tr else 0
+            return tr,wr,R,ev
+        half=n//2
+        o=("Тест '"+strat+"' "+sym+" 4ч | свечей "+str(n)+" | сигналов "+str(len(sig))+"\n")
+        for label,lo,hi in [("ВСЯ",0,n),("Обучение",0,half),("Проверка(OOS)",half,n)]:
+            tr,wr,R,ev=run(lo,hi)
+            o+=label+": сделок="+str(tr)+", винрейт="+str(round(wr,1))+"%, итог="+str(round(R,1))+"R, EV="+str(round(ev,3))+"R\n"
+        ot,owr,oR,oev=run(half,n)
+        return o, (oev, oR, ot)
+
+    def _done(self, placeholder, answer):
+        if placeholder=="думаю...":
+            self.out.text = self.out.text.replace("\n[Ассистент] думаю...\n","")
+        elif placeholder=="двойной":
+            self.out.text = self.out.text.replace("\n[…] двойной тест на "+TREND_COIN+" и "+FLAT_COIN+", это ~30-60 сек, подожди...\n","")
         self._add("Ассистент", answer)
-        self.history.append({"role": "assistant", "content": answer})
         self.btn.disabled = False
 
 if __name__ == "__main__":
