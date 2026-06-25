@@ -19,7 +19,10 @@ jobs:
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip \
             autoconf libtool pkg-config zlib1g-dev libncurses-dev \
             libtinfo6 cmake libffi-dev libssl-dev build-essential \
-            libltdl-dev gettext
+            libltdl-dev gettext fonts-dejavu-core
+
+      - name: Add Cyrillic font
+        run: cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ./DejaVuSans.ttf
 
       - name: Install Buildozer
         run: |
@@ -29,7 +32,6 @@ jobs:
       - name: Accept Android licenses
         run: |
           yes | buildozer android debug || true
-          mkdir -p ~/.buildozer/android/platform/android-sdk/cmdline-tools/latest
           yes | ~/.buildozer/android/platform/android-sdk/cmdline-tools/*/bin/sdkmanager --licenses || true
 
       - name: Build APK
