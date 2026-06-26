@@ -1,4 +1,5 @@
-__version__ = "2.1"
+
+__version__ = "2.2"
 import os, json, threading
 from kivy.app import App
 from kivy.core.window import Window
@@ -12,7 +13,8 @@ from kivy.clock import Clock
 from kivy.core.text import LabelBase
 from kivy.metrics import dp
 
-Window.softinput_mode = "pan"
+Window.softinput_mode = "below_target"
+Window.clearcolor = (1, 1, 1, 1)  # белый фон окна
 
 _FONT = "DejaVuSans.ttf"
 if os.path.exists(_FONT):
@@ -41,29 +43,6 @@ WEB = ["сегодня","сейчас","новост","последн","свеж
 SYSTEM = "Ты полезный ассистент. Отвечай по-русски, ясно и по делу."
 
 
-# Окно вывода: можно выделять/копировать (долгое нажатие),
-# но клавиатура НЕ открывается по касанию.
-class ReadView(TextInput):
-    def keyboard_on_key_down(self, *a):
-        return False  # игнорировать ввод с клавиатуры
-
-    def insert_text(self, substring, from_undo=False):
-        return  # запрет ввода текста
-
-    def do_backspace(self, *a, **k):
-        return  # запрет удаления
-
-    def _bind_keyboard(self, *a):
-        # не запрашивать системную клавиатуру при фокусе
-        pass
-
-    def on_touch_down(self, touch):
-        if self.collide_point(*touch.pos):
-            # отдать обработку выделения, но не открывать клавиатуру
-            self.focus = False
-        return super().on_touch_down(touch)
-
-
 class Assistant(App):
     def build(self):
         self.title = "Мой ассистент"
@@ -88,17 +67,23 @@ class Assistant(App):
         self.actions = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(4))
         root.add_widget(self.actions)
 
-        # ОКНО ВЫВОДА: выделяемое, но без клавиатуры
-        self.display = ReadView(text="", font_size=dp(16), size_hint_y=1,
-                                background_color=(0.08,0.08,0.08,1),
-                                foreground_color=(1,1,1,1),
-                                cursor_color=(0,0,0,0),
-                                use_bubble=True, use_handles=True)
+        # ОКНО ВЫВОДА: readonly TextInput на белом фоне.
+        # Выделение/копирование работают (долгое нажатие).
+        # readonly => своя клавиатура НЕ открывается при касании.
+        self.display = TextInput(text="", font_size=dp(16), size_hint_y=1,
+                                 readonly=True,
+                                 background_color=(1, 1, 1, 1),
+                                 foreground_color=(0, 0, 0, 1),
+                                 cursor_color=(0, 0, 0, 0),
+                                 use_bubble=True, use_handles=True)
         root.add_widget(self.display)
 
         self.inp = TextInput(hint_text="Напиши сообщение...", multiline=False,
                              size_hint_y=None, height=dp(50), font_size=dp(18),
-                             input_type="text")
+                             input_type="text",
+                             background_color=(0.95, 0.95, 0.95, 1),
+                             foreground_color=(0, 0, 0, 1),
+                             hint_text_color=(0.5, 0.5, 0.5, 1))
         self.inp.bind(on_text_validate=lambda *_: self.go())
         root.add_widget(self.inp)
 
