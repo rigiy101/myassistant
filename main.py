@@ -1,4 +1,4 @@
-__version__ = "2.0"
+__version__ = "2.1"
 import os, json, threading
 from kivy.app import App
 from kivy.core.window import Window
@@ -31,20 +31,6 @@ try:
 except Exception:
     bybit = None
 
-# Голосовой ввод через Android (движок Google)
-HAVE_VOICE = False
-try:
-    from jnius import autoclass
-    from android import activity as _android_activity
-    _PythonActivity = autoclass('org.kivy.android.PythonActivity')
-    _Intent = autoclass('android.content.Intent')
-    _Recognizer = autoclass('android.speech.RecognizerIntent')
-    HAVE_VOICE = True
-except Exception:
-    HAVE_VOICE = False
-
-VOICE_REQ = 7001
-
 DS_URL = "https://api.deepseek.com/chat/completions"
 TV_URL = "https://api.tavily.com/search"
 MODEL_FAST = "deepseek-chat"
@@ -53,6 +39,30 @@ SMART = ["почему","проанализир","разбер","сравни","
          "посчитай","реши","докажи","в чём разница","плюсы и минусы"]
 WEB = ["сегодня","сейчас","новост","последн","свеж","актуальн","происходит","погода","2026"]
 SYSTEM = "Ты полезный ассистент. Отвечай по-русски, ясно и по делу."
+
+
+# Окно вывода: можно выделять/копировать (долгое нажатие),
+# но клавиатура НЕ открывается по касанию.
+class ReadView(TextInput):
+    def keyboard_on_key_down(self, *a):
+        return False  # игнорировать ввод с клавиатуры
+
+    def insert_text(self, substring, from_undo=False):
+        return  # запрет ввода текста
+
+    def do_backspace(self, *a, **k):
+        return  # запрет удаления
+
+    def _bind_keyboard(self, *a):
+        # не запрашивать системную клавиатуру при фокусе
+        pass
+
+    def on_touch_down(self, touch):
+        if self.collide_point(*touch.pos):
+            # отдать обработку выделения, но не открывать клавиатуру
+            self.focus = False
+        return super().on_touch_down(touch)
+
 
 class Assistant(App):
     def build(self):
@@ -64,12 +74,7 @@ class Assistant(App):
         self.ds_key = self._load(self.ds_path)
         self.tv_key = self._load(self.tv_path)
         self.ex_out = "Биржа. Напиши монету (BTC, ETH, SOL) и нажми «Отправить»."
-        self._guard = False  # защита окна вывода от правок
         self._load_convos()
-
-        if HAVE_VOICE:
-            try: _android_activity.bind(on_activity_result=self._on_activity_result)
-            except Exception: pass
 
         root = BoxLayout(orientation="vertical", padding=dp(6), spacing=dp(6))
 
@@ -83,13 +88,12 @@ class Assistant(App):
         self.actions = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(4))
         root.add_widget(self.actions)
 
-        # ОКНО ВЫВОДА: обычный TextInput (выделяется → родное «Копировать»),
-        # но защищён от случайных правок (текст возвращается назад).
-        self.display = TextInput(text="", font_size=dp(16), size_hint_y=1,
-                                 background_color=(0.08,0.08,0.08,1),
-                                 foreground_color=(1,1,1,1),
-                                 cursor_color=(1,1,1,1))
-        self.display.bind(text=self._guard_text)
+        # ОКНО ВЫВОДА: выделяемое, но без клавиатуры
+        self.display = ReadView(text="", font_size=dp(16), size_hint_y=1,
+                                background_color=(0.08,0.08,0.08,1),
+                                foreground_color=(1,1,1,1),
+                                cursor_color=(0,0,0,0),
+                                use_bubble=True, use_handles=True)
         root.add_widget(self.display)
 
         self.inp = TextInput(hint_text="Напиши сообщение...", multiline=False,
@@ -98,65 +102,21 @@ class Assistant(App):
         self.inp.bind(on_text_validate=lambda *_: self.go())
         root.add_widget(self.inp)
 
-        bottom = BoxLayout(size_hint_y=None, height=dp(52), spacing=dp(4))
-        self.mic = Button(text="Голос", size_hint_x=None, width=dp(90), font_size=dp(16))
-        self.mic.bind(on_press=lambda *_: self._listen())
-        self.btn = Button(text="Отправить", font_size=dp(18))
+        self.btn = Button(text="Отправить", size_hint_y=None, height=dp(52), font_size=dp(18))
         self.btn.bind(on_press=lambda *_: self.go())
-        bottom.add_widget(self.mic); bottom.add_widget(self.btn)
-        root.add_widget(bottom)
+        root.add_widget(self.btn)
 
         self._set_mode("Чат")
         if not self.ds_key:
             Clock.schedule_once(lambda *_: self._popup_key("ds"), 0.4)
         return root
 
-    # окно вывода: защита от правок (вернуть текст, если пользователь печатает в нём)
-    def _guard_text(self, inst, value):
-        if self._guard:
-            return
-        if value != self._shown:
-            self._guard = True
-            inst.text = self._shown
-            self._guard = False
-
     def _set_display(self, text):
-        self._shown = text
-        self._guard = True
         self.display.text = text
-        self._guard = False
         self._scroll_end()
 
-    # ---------- ГОЛОС ----------
-    def _listen(self):
-        if not HAVE_VOICE:
-            self._info("Голосовой ввод недоступен на этом устройстве.")
-            return
-        try:
-            intent = _Intent(_Recognizer.ACTION_RECOGNIZE_SPEECH)
-            intent.putExtra(_Recognizer.EXTRA_LANGUAGE_MODEL, _Recognizer.LANGUAGE_MODEL_FREE_FORM)
-            intent.putExtra(_Recognizer.EXTRA_LANGUAGE, "ru-RU")
-            intent.putExtra(_Recognizer.EXTRA_PROMPT, "Говорите...")
-            _PythonActivity.mActivity.startActivityForResult(intent, VOICE_REQ)
-        except Exception as e:
-            self._info("Не удалось включить голос: " + str(e)[:60])
-
-    def _on_activity_result(self, requestCode, resultCode, intent):
-        if requestCode != VOICE_REQ or intent is None:
-            return
-        try:
-            res = intent.getStringArrayListExtra(_Recognizer.EXTRA_RESULTS)
-            if res and res.size() > 0:
-                spoken = res.get(0)
-                Clock.schedule_once(lambda *_: self._put_voice(spoken), 0)
-        except Exception:
-            pass
-
-    def _put_voice(self, spoken):
-        self.inp.text = (self.inp.text + " " + spoken).strip()
-
     def _info(self, msg):
-        self._set_display((self._shown + "\n\n[i] " + msg).strip())
+        self._set_display((self.display.text + "\n\n[i] " + msg).strip())
 
     def _load(self, p):
         try:
@@ -295,7 +255,7 @@ class Assistant(App):
                 self.btn.disabled=False; self._popup_key("ds"); return
             self.convos[self.cur]["history"].append({"role":"user","content":text})
             self._render_chat()
-            self._set_display(self._shown + "\n\nАссистент: думаю...")
+            self._set_display(self.display.text + "\n\nАссистент: думаю...")
             threading.Thread(target=self._do_chat, args=(text,), daemon=True).start()
 
     def _do_chat(self, text):
